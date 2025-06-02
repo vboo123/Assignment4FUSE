@@ -235,31 +235,66 @@ static int xmp_open(const char *path, struct fuse_file_info *fi) {
 static int xmp_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
     char fpath[PATH_MAX];
     full_path(fpath, path);
+
     int fd = open(fpath, O_RDONLY);
     if (fd == -1) return -errno;
+
     unsigned char enc_buf[8192];
     int read_bytes = pread(fd, enc_buf, sizeof(enc_buf), 0);
     close(fd);
-    if (read_bytes <= IV_LEN) return 0;
+
+    if (read_bytes <= IV_LEN) {
+        // Plaintext fallback (e.g., pre-existing file like test.txt)
+        fd = open(fpath, O_RDONLY);
+        if (fd == -1) return -errno;
+        int plain_bytes = pread(fd, buf, size, offset);
+        close(fd);
+        return plain_bytes;
+    }
+
     unsigned char *iv = enc_buf;
     unsigned char *enc_data = enc_buf + IV_LEN;
+
     int dec_len = decrypt_data(enc_data, read_bytes - IV_LEN, buf, iv);
     return dec_len;
 }
 
 static int xmp_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
+    // ONLY support offset = 0 writes
+    if (offset != 0) {
+        fprintf(stderr, "Error: this FUSE FS only supports whole file writes (offset must be 0)\n");
+        return -EIO;
+    }
+
     char fpath[PATH_MAX];
     full_path(fpath, path);
+
     unsigned char iv[IV_LEN];
-    unsigned char enc_buf[8192];
-    int enc_len = encrypt_data(buf, size, enc_buf + IV_LEN, iv);
-    memcpy(enc_buf, iv, IV_LEN);
-    int fd = open(fpath, O_WRONLY | O_CREAT, 0644);
-    if (fd == -1) return -errno;
-    int res = pwrite(fd, enc_buf, enc_len + IV_LEN, offset);
-    if (res == -1) res = -errno;
+    unsigned char *enc_buf = malloc(size + EVP_MAX_BLOCK_LENGTH);
+    if (!enc_buf) return -ENOMEM;
+
+    int enc_len = encrypt_data(buf, size, enc_buf, iv);
+    if (enc_len <= 0) {
+        free(enc_buf);
+        return -EIO;
+    }
+
+    int fd = open(fpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd == -1) {
+        free(enc_buf);
+        return -errno;
+    }
+
+    // Write IV first, then ciphertext
+    if (write(fd, iv, IV_LEN) != IV_LEN || write(fd, enc_buf, enc_len) != enc_len) {
+        close(fd);
+        free(enc_buf);
+        return -EIO;
+    }
+
     close(fd);
-    return res - IV_LEN;
+    free(enc_buf);
+    return size;  // return original plaintext size
 }
 
 static int xmp_statfs(const char *path, struct statvfs *stbuf) {
