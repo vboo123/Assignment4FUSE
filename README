@@ -1,0 +1,9 @@
+Vaibhav Garg
+Rishi Gupta
+
+SHould be able to run like this
+./mirror_fs <mountpoint> <directory to mirror>
+
+
+And to unmount, this should work
+fusermount -u <mountpoint>
